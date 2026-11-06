@@ -413,7 +413,7 @@ class EMCalibrator:
         w = None if observed is None else observed.astype(np.float64)
 
         out = np.empty((n, s), dtype=np.float64)
-        step = max(1, 4_000_000 // max(s, 1))     # 每块约 32 MB
+        step = max(1, 2_000_000 // max(s, 1))     # 每块约 16 MB
         for start in range(0, n, step):
             stop = min(start + step, n)
             xc = x[start:stop]
@@ -508,7 +508,6 @@ class EMCalibrator:
 
         缺失该题的被试同时从 ``N_g`` 与 ``C_g`` 中剔除。
         """
-        n = responses.shape[0]
         beta = np.zeros(self.q.n_items)
         gamma: List[np.ndarray] = []
 
@@ -808,7 +807,7 @@ class EMCalibrator:
         w = None if observed is None else observed.astype(np.float64)
 
         total = 0.0
-        step = max(1, 4_000_000 // max(s, 1))
+        step = max(1, 2_000_000 // max(s, 1))
         for start in range(0, n, step):
             stop = min(start + step, n)
             xc = x[start:stop]
@@ -938,7 +937,6 @@ class EMCalibrator:
         n_prior_params = self.n_prior_params
         n_params = self.n_free_params
         n = responses.shape[0]
-        n_obs = n * self.q.n_items
         ll_final = ll_hist[-1] if ll_hist else 0.0
         deviance = -2.0 * ll_final
         aic = deviance + 2 * n_params
