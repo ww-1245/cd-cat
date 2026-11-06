@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cdcat"
-version = "1.1.0"
+version = "1.1.1"
 description = "认知诊断计算机自适应测验 (CD-CAT) 选题与仿真系统"
 readme = "README.md"
 requires-python = ">=3.9"

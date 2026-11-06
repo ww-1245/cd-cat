@@ -44,9 +44,17 @@ from .qmatrix import QMatrix
 __all__ = ["CDMAnalysis", "run_cdm_analysis"]
 
 #: 已知的嵌套关系（restricted ⊂ full）；只有这些组合的 LRT 才服从 χ²
+#:
+#: G-DINA 是**饱和**模型（每题 2^{r_j} 个自由概率），所以 DINA / DINO /
+#: RRUM / ACDM / LLM 都是它的受限特例，检验自由度分别为
+#: ``Σ_j [2^{r_j} - k_restricted]``。受限模型彼此之间不嵌套：例如 DINA 与
+#: ACDM 各有对方表达不了的形状，谁也不包含谁。
 _NESTED_PAIRS = {
     frozenset(("DINA", "G-DINA")),
     frozenset(("DINO", "G-DINA")),
+    frozenset(("RRUM", "G-DINA")),
+    frozenset(("ACDM", "G-DINA")),
+    frozenset(("LLM", "G-DINA")),
 }
 
 
@@ -416,16 +424,21 @@ def run_cdm_analysis(
         )
         analysis.lrt["restricted"] = restricted
         analysis.lrt["full"] = full
-        # χ² 近似只在嵌套模型下成立。DINA / DINO 嵌套于 G-DINA，其余
-        # （RRUM、ACDM、LLM 与它们之间）都不构成嵌套关系，此时 LR 仍可
-        # 作为"似然差有多大"的描述量，但 p 值不可信，必须提示改看 AIC/BIC。
-        if frozenset((restricted, full)) not in _NESTED_PAIRS:
-            analysis.lrt["note"] = (
+        # χ² 近似只在嵌套模型下成立。五个受限模型都嵌套于饱和的 G-DINA，
+        # 它们彼此之间（如 DINA 与 ACDM）则不嵌套，此时 LR 仍可作为
+        # "似然差有多大"的描述量，但 p 值不可信，必须提示改看 AIC/BIC。
+        nested = frozenset((restricted, full)) in _NESTED_PAIRS
+        analysis.lrt["nested"] = nested
+        notes = []
+        if not nested:
+            notes.append(
                 f"{restricted} 与 {full} 不是嵌套关系，χ² 近似不成立；"
                 "模型选择请以 AIC / BIC 为准"
             )
         if note:
-            analysis.lrt["note"] = note
+            notes.append(note)
+        if notes:
+            analysis.lrt["note"] = "；".join(notes)
 
     # 参数恢复评价
     if true_slip is not None and true_guess is not None:

@@ -31,11 +31,17 @@ M 步（按模型解析或半解析更新）：
 ``2^K - 1`` 个自由参数计入惩罚，保证与"固定先验"的可比性。可用
 ``estimate_prior=False`` 关闭，或自行传入 ``prior`` 固定。
 
+**缺失作答按题边际化**：``np.nan`` 表示未作答，该题既不进入这一被试的
+似然项，也不进入各 M 步的分子分母（MAR 假设）。把缺失当成答错会让
+已掌握属性者被记一次失误：实测 20% 随机缺失时 slip 会从 0.10 抬到 0.29，
+40% 时顶到上界。
+
 所有 M 步都接受 ``clip`` 边界以保证数值稳定与 ``1-s > g`` 的单调性约束。
 """
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -75,6 +81,9 @@ class CalibrationResult:
         自由参数总数 = 题目参数 + 属性先验参数（若估计）。
     attr_prior : ndarray, shape (2^K,)
         属性模式先验 π(α)。经验贝叶斯估计所得，或用户指定值。
+    n_missing : int
+        作答矩阵中缺失单元格（``np.nan``）的个数。E 步按题边际化处理，
+        不是当作答错——后者会把 slip 系统性抬高（见模块文档）。
     """
 
     model_name: str = "DINA"
@@ -100,6 +109,7 @@ class CalibrationResult:
     n_prior_params: int = 0
     attr_prior: Optional[np.ndarray] = None
     prior_estimated: bool = False
+    n_missing: int = 0
 
     # ------------------------------------------------------------------ #
     @property
@@ -136,6 +146,10 @@ class CalibrationResult:
             head += (
                 f"\n  参数构成: 题目 {self.n_item_params} + 先验 {self.n_prior_params}"
                 f"（经验贝叶斯估计 π(α)）"
+            )
+        if self.n_missing:
+            head += (
+                f"\n  缺失作答: {self.n_missing} 个单元格（已按题边际化，未当作答错）"
             )
         if self.slip is not None and self.guess is not None:
             head += (
@@ -370,49 +384,85 @@ class EMCalibrator:
     # ------------------------------------------------------------------ #
     # E 步
     # ------------------------------------------------------------------ #
-    def _e_step(self, responses: np.ndarray, p: np.ndarray) -> np.ndarray:
+    def _e_step(
+        self,
+        responses: np.ndarray,
+        p: np.ndarray,
+        observed: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
         """E 步：返回后验责任矩阵 (n_examinees, n_patterns)。
 
         ``p`` 为 P(X=1|α) 矩阵，形状 (S, J)。
+
+        缺失作答（``observed=False``）**不参与**该被试的似然，等价于对缺失题
+        做边际化：``Π_j P(x_ij|α)^{obs_ij}``。若把缺失当成答错，
+        已掌握属性者会被记一次失误，slip 会被系统性高估。
+
+        实现上按行分块做两次矩阵乘法（``X @ logP1.T + (1-X) @ logP0.T``），
+        比逐人循环快一个数量级，同时用分块把中间矩阵控制在几十 MB 内。
         """
         n = responses.shape[0]
+        s = self.q.n_patterns
+        observed = _resolve_observed(responses, observed)
         p = np.clip(p, 1e-10, 1 - 1e-10)
         log_p1 = np.log(p)
         log_p0 = np.log(1.0 - p)
         log_prior = np.log(self.prior + 1e-300)
 
-        resp = np.empty((n, self.q.n_patterns), dtype=np.float64)
-        for i in range(n):
-            x = responses[i]
-            ll = (x[None, :] * log_p1 + (1.0 - x)[None, :] * log_p0).sum(axis=1)
-            ll = ll + log_prior
-            ll -= ll.max()
+        x = np.nan_to_num(responses, nan=0.0)
+        w = None if observed is None else observed.astype(np.float64)
+
+        out = np.empty((n, s), dtype=np.float64)
+        step = max(1, 4_000_000 // max(s, 1))     # 每块约 32 MB
+        for start in range(0, n, step):
+            stop = min(start + step, n)
+            xc = x[start:stop]
+            if w is None:
+                ll = xc @ log_p1.T + (1.0 - xc) @ log_p0.T
+            else:
+                wc = w[start:stop]
+                # 缺失项两项都为 0，等价于从连乘中剔除
+                ll = (xc * wc) @ log_p1.T + ((1.0 - xc) * wc) @ log_p0.T
+            ll += log_prior
+            ll -= ll.max(axis=1, keepdims=True)
             z = np.exp(ll)
-            resp[i] = z / z.sum()
-        return resp
+            out[start:stop] = z / z.sum(axis=1, keepdims=True)
+        return out
 
     # ------------------------------------------------------------------ #
     # M 步
     # ------------------------------------------------------------------ #
     def _m_step(
-        self, responses: np.ndarray, resp: np.ndarray, params: Dict[str, object]
+        self,
+        responses: np.ndarray,
+        resp: np.ndarray,
+        params: Dict[str, object],
+        observed: Optional[np.ndarray] = None,
     ) -> Dict[str, object]:
+        observed = _resolve_observed(responses, observed)
         if self.model_type in ("DINA", "DINO"):
-            return self._m_step_dina(responses, resp)
+            return self._m_step_dina(responses, resp, observed)
         if self.model_type == "G-DINA":
-            return self._m_step_gdina(responses, resp)
+            return self._m_step_gdina(responses, resp, observed)
         if self.model_type == "RRUM":
-            return self._m_step_rrum(responses, resp)
+            return self._m_step_rrum(responses, resp, observed)
         if self.model_type == "ACDM":
-            return self._m_step_acdm(responses, resp)
+            return self._m_step_acdm(responses, resp, observed)
         if self.model_type == "LLM":
-            return self._m_step_llm(responses, resp)
+            return self._m_step_llm(responses, resp, observed)
         raise ValueError(self.model_type)
 
     def _m_step_dina(
-        self, responses: np.ndarray, resp: np.ndarray
+        self,
+        responses: np.ndarray,
+        resp: np.ndarray,
+        observed: Optional[np.ndarray] = None,
     ) -> Dict[str, object]:
-        """DINA / DINO 的闭式 M 步。"""
+        """DINA / DINO 的闭式 M 步。
+
+        分母只累计**观测到**该题的被试责任：缺失者既不算对也不算错，
+        否则 slip 会被分母里那些"被当成 0 分"的缺失抬高。
+        """
         lo, hi = self.bounds
         j = self.q.n_items
         slip = np.zeros(j)
@@ -420,8 +470,14 @@ class EMCalibrator:
         for item in range(j):
             eta_j = self.eta[:, item]
             x_j = responses[:, item]
-            w1 = resp * eta_j[None, :]
-            w0 = resp * (1.0 - eta_j)[None, :]
+            if observed is None:
+                w = resp
+            else:
+                obs_j = observed[:, item]
+                x_j = np.where(obs_j, x_j, 0.0)
+                w = resp * obs_j[:, None]
+            w1 = w * eta_j[None, :]
+            w0 = w * (1.0 - eta_j)[None, :]
             n1 = w1.sum()
             n0 = w0.sum()
             slip[item] = float((w1 * (1.0 - x_j)[:, None]).sum() / n1) if n1 > 1e-10 else lo
@@ -437,7 +493,10 @@ class EMCalibrator:
         return {"slip": slip, "guess": guess}
 
     def _m_step_gdina(
-        self, responses: np.ndarray, resp: np.ndarray
+        self,
+        responses: np.ndarray,
+        resp: np.ndarray,
+        observed: Optional[np.ndarray] = None,
     ) -> Dict[str, object]:
         """G-DINA 的 M 步：各潜在组概率 = 组内期望答对率，再取 logit。
 
@@ -446,6 +505,8 @@ class EMCalibrator:
         其中答对人数为 ``C_g = Σ_i Σ_{α∈g} h_i(α)·X_ij``。
         组概率 ``P_g = C_g / N_g``，在指示函数基下与 λ 参数一一对应：
         先算组 logit，再用设计矩阵解出 λ。
+
+        缺失该题的被试同时从 ``N_g`` 与 ``C_g`` 中剔除。
         """
         n = responses.shape[0]
         beta = np.zeros(self.q.n_items)
@@ -454,11 +515,18 @@ class EMCalibrator:
         for i in range(self.q.n_items):
             req = np.where(self.q.matrix[i] == 1)[0]
             r = len(req)
-            x_i = responses[:, i]                       # (n,)
+            obs_i = None if observed is None else observed[:, i]
+            x_i = responses[:, i]
+            if obs_i is not None:
+                x_i = np.where(obs_i, x_i, 0.0)
             if r == 0:
                 # 不考查任何属性：单一组，直接取样本答对率
-                denom = resp.sum()
-                p1 = float((resp.sum(axis=1) * x_i).sum() / denom) if denom > 1e-10 else 0.5
+                denom = resp.sum() if obs_i is None else resp.sum(axis=1) @ obs_i
+                p1 = (
+                    float((resp.sum(axis=1) * x_i).sum() / denom)
+                    if denom > 1e-10
+                    else 0.5
+                )
                 beta[i] = _logit_scalar(p1)
                 gamma.append(np.zeros(0))
                 continue
@@ -472,6 +540,8 @@ class EMCalibrator:
                 bits = np.array([(g >> (r - 1 - pos)) & 1 for pos in range(r)])
                 in_group = (sub == bits[None, :]).all(axis=1)      # (S,)
                 w = resp[:, in_group].sum(axis=1)                  # (n,)
+                if obs_i is not None:
+                    w = w * obs_i
                 group_denom[g] = w.sum()
                 group_correct[g] = (w * x_i).sum()
 
@@ -508,7 +578,10 @@ class EMCalibrator:
         return x
 
     def _m_step_rrum(
-        self, responses: np.ndarray, resp: np.ndarray
+        self,
+        responses: np.ndarray,
+        resp: np.ndarray,
+        observed: Optional[np.ndarray] = None,
     ) -> Dict[str, object]:
         """RRUM 的 M 步。
 
@@ -516,6 +589,8 @@ class EMCalibrator:
         其余模式按缺少的属性数应用惩罚 ``r*_{jk}``。
         这里用组期望答对率与惩罚累乘的解析关系更新：
         对每组求观测答对率，再逐属性拟合惩罚因子。
+
+        缺失该题的被试同时从各组分子与分母中剔除。
         """
         lo, hi = self.bounds
         pi_star = np.zeros(self.q.n_items)
@@ -524,10 +599,17 @@ class EMCalibrator:
         for i in range(self.q.n_items):
             req = np.where(self.q.matrix[i] == 1)[0]
             r = len(req)
+            obs_i = None if observed is None else observed[:, i]
             x_i = responses[:, i]
+            if obs_i is not None:
+                x_i = np.where(obs_i, x_i, 0.0)
             if r == 0:
-                denom = resp.sum()
-                pi_star[i] = float((resp.sum(axis=1) * x_i).sum() / denom) if denom > 1e-10 else 0.5
+                denom = resp.sum() if obs_i is None else resp.sum(axis=1) @ obs_i
+                pi_star[i] = (
+                    float((resp.sum(axis=1) * x_i).sum() / denom)
+                    if denom > 1e-10
+                    else 0.5
+                )
                 r_star.append(np.zeros(1))
                 continue
 
@@ -539,6 +621,8 @@ class EMCalibrator:
                 bits = np.array([(g >> (r - 1 - pos)) & 1 for pos in range(r)])
                 in_group = (sub == bits[None, :]).all(axis=1)
                 w = resp[:, in_group].sum(axis=1)
+                if obs_i is not None:
+                    w = w * obs_i
                 denom[g] = w.sum()
                 correct[g] = (w * x_i).sum()
 
@@ -564,7 +648,11 @@ class EMCalibrator:
     # ACDM / LLM 的 M 步
     # ------------------------------------------------------------------ #
     def _group_stats(
-        self, item_idx: int, responses: np.ndarray, resp: np.ndarray
+        self,
+        item_idx: int,
+        responses: np.ndarray,
+        resp: np.ndarray,
+        observed: Optional[np.ndarray] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """第 i 题各潜在组的（属性组合, 后验权重, 加权答对数）。
 
@@ -572,13 +660,21 @@ class EMCalibrator:
         ``权重 = Σ_人 该组责任``、``答对 = Σ_人 责任 · x_ij``，
         两者相除就是该组的加权答对率——这是 ACDM / LLM / RRUM 三个
         M 步共同的输入，抽出来避免写三遍。
+
+        缺失该题的被试权重记 0，即从分子与分母里同时消失。
         """
         req = np.where(self.q.matrix[item_idx] == 1)[0]
         r = len(req)
+        obs_i = None if observed is None else observed[:, item_idx]
         x_i = responses[:, item_idx]
+        if obs_i is not None:
+            x_i = np.where(obs_i, x_i, 0.0)
         if r == 0:
-            return np.zeros((1, 0)), np.array([resp.sum()]), np.array(
-                [float((resp.sum(axis=1) * x_i).sum())]
+            weight0 = resp.sum() if obs_i is None else float(resp.sum(axis=1) @ obs_i)
+            return (
+                np.zeros((1, 0)),
+                np.array([weight0]),
+                np.array([float((resp.sum(axis=1) * x_i).sum())]),
             )
 
         sub = self.patterns[:, req]
@@ -589,11 +685,18 @@ class EMCalibrator:
         for g in range(n_groups):
             in_group = (sub == bits[g][None, :]).all(axis=1)
             w_g = resp[:, in_group].sum(axis=1)
+            if obs_i is not None:
+                w_g = w_g * obs_i
             weight[g] = w_g.sum()
             correct[g] = (w_g * x_i).sum()
         return bits, weight, correct
 
-    def _m_step_acdm(self, responses: np.ndarray, resp: np.ndarray) -> Dict[str, object]:
+    def _m_step_acdm(
+        self,
+        responses: np.ndarray,
+        resp: np.ndarray,
+        observed: Optional[np.ndarray] = None,
+    ) -> Dict[str, object]:
         """ACDM 的 M 步：对分组答对率做加权最小二乘。
 
         ACDM 在**概率尺度**上是线性的（``P = Xδ``），所以给定后验责任后
@@ -603,7 +706,7 @@ class EMCalibrator:
         delta: List[np.ndarray] = []
 
         for i in range(self.q.n_items):
-            bits, weight, correct = self._group_stats(i, responses, resp)
+            bits, weight, correct = self._group_stats(i, responses, resp, observed)
             r = bits.shape[1]
             if r == 0:
                 p = correct[0] / max(weight[0], 1e-10)
@@ -626,7 +729,12 @@ class EMCalibrator:
 
         return {"delta0": delta0, "delta": delta}
 
-    def _m_step_llm(self, responses: np.ndarray, resp: np.ndarray) -> Dict[str, object]:
+    def _m_step_llm(
+        self,
+        responses: np.ndarray,
+        resp: np.ndarray,
+        observed: Optional[np.ndarray] = None,
+    ) -> Dict[str, object]:
         """LLM 的 M 步：对分组答对率做二项 logistic 回归（IRLS）。
 
         每组只有"权重 / 加权答对数"，所以是 ``2^{r_j}`` 行的加权回归，
@@ -637,7 +745,7 @@ class EMCalibrator:
         beta: List[np.ndarray] = []
 
         for i in range(self.q.n_items):
-            bits, weight, correct = self._group_stats(i, responses, resp)
+            bits, weight, correct = self._group_stats(i, responses, resp, observed)
             r = bits.shape[1]
             if r == 0:
                 p = np.clip(correct[0] / max(weight[0], 1e-10), 1e-3, 1.0 - 1e-3)
@@ -682,19 +790,37 @@ class EMCalibrator:
     # ------------------------------------------------------------------ #
     # 似然
     # ------------------------------------------------------------------ #
-    def _log_likelihood(self, responses: np.ndarray, p: np.ndarray) -> float:
+    def _log_likelihood(
+        self,
+        responses: np.ndarray,
+        p: np.ndarray,
+        observed: Optional[np.ndarray] = None,
+    ) -> float:
+        """边际对数似然。缺失作答按题边际化（不进入该被试的似然项）。"""
+        observed = _resolve_observed(responses, observed)
         p = np.clip(p, 1e-10, 1 - 1e-10)
         log_p1 = np.log(p)
         log_p0 = np.log(1.0 - p)
         log_prior = np.log(self.prior + 1e-300)
+
+        n, s = responses.shape[0], self.q.n_patterns
+        x = np.nan_to_num(responses, nan=0.0)
+        w = None if observed is None else observed.astype(np.float64)
+
         total = 0.0
-        for i in range(responses.shape[0]):
-            x = responses[i]
-            ll = (x[None, :] * log_p1 + (1.0 - x)[None, :] * log_p0).sum(axis=1)
-            ll = ll + log_prior
-            m = ll.max()
-            total += m + np.log(np.exp(ll - m).sum())
-        return float(total)
+        step = max(1, 4_000_000 // max(s, 1))
+        for start in range(0, n, step):
+            stop = min(start + step, n)
+            xc = x[start:stop]
+            if w is None:
+                ll = xc @ log_p1.T + (1.0 - xc) @ log_p0.T
+            else:
+                wc = w[start:stop]
+                ll = (xc * wc) @ log_p1.T + ((1.0 - xc) * wc) @ log_p0.T
+            ll += log_prior
+            m = ll.max(axis=1, keepdims=True)
+            total += float((m[:, 0] + np.log(np.exp(ll - m).sum(axis=1))).sum())
+        return total
 
     # ------------------------------------------------------------------ #
     # 初始化
@@ -750,7 +876,9 @@ class EMCalibrator:
         Parameters
         ----------
         responses : ndarray, shape (n_examinees, n_items)
-            0/1 作答矩阵。缺失值 ``np.nan`` 按 0 处理（建议先填补）。
+            0/1 作答矩阵。缺失值用 ``np.nan`` 标记：E 步与各 M 步按题**边际化**
+            （该题不进入这一被试的似然，也不进参数的分母），
+            等价于 MAR 假设下的处理。若整列缺失，该题参数不可识别，会保持初值。
         slip_init, guess_init : array-like, optional
             初始值；DINA/DINO 默认 0.1，也可用于其他模型的初值来源。
         verbose : bool
@@ -768,8 +896,20 @@ class EMCalibrator:
             raise ValueError(
                 f"作答矩阵列数 {responses.shape[1]} 与题目数 {self.q.n_items} 不符"
             )
+
+        observed: Optional[np.ndarray] = None
+        n_missing = 0
         if np.isnan(responses).any():
-            responses = np.nan_to_num(responses, nan=0.0)
+            observed = ~np.isnan(responses)
+            n_missing = int((~observed).sum())
+            empty = np.where(~observed.any(axis=0))[0]
+            if empty.size:
+                warnings.warn(
+                    f"第 {empty.tolist()} 题全部作答缺失，其题目参数不可识别，"
+                    "将保持初值（DINA 类落到下界）。",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
 
         params = self._initial_params(slip_init, guess_init)
         ll_hist: List[float] = []
@@ -779,13 +919,13 @@ class EMCalibrator:
 
         for it in range(1, self.max_iter + 1):
             p = self._prob_matrix(params)
-            resp = self._e_step(responses, p)
-            params = self._m_step(responses, resp, params)
+            resp = self._e_step(responses, p, observed)
+            params = self._m_step(responses, resp, params, observed)
             # M 步之二：经验贝叶斯更新属性模式先验 π(α)
             if self.estimate_prior:
                 self._update_prior(resp)
 
-            ll = self._log_likelihood(responses, self._prob_matrix(params))
+            ll = self._log_likelihood(responses, self._prob_matrix(params), observed)
             ll_hist.append(ll)
             if verbose and (it % 5 == 0 or it == 1):
                 print(f"  iter {it:4d}  loglik={ll:.4f}  Δ={ll - prev_ll:.6f}")
@@ -820,6 +960,7 @@ class EMCalibrator:
             n_prior_params=int(n_prior_params),
             attr_prior=self.prior.copy(),
             prior_estimated=bool(self.estimate_prior),
+            n_missing=n_missing,
         )
         # 填充各模型参数
         if self.model_type in ("DINA", "DINO"):
@@ -954,6 +1095,21 @@ from ..diagnostics import diagnose_patterns  # noqa: E402
 def _logit_scalar(p: float) -> float:
     p = float(np.clip(p, 1e-6, 1 - 1e-6))
     return float(np.log(p / (1.0 - p)))
+
+
+def _resolve_observed(
+    responses: np.ndarray, observed: Optional[np.ndarray]
+) -> Optional[np.ndarray]:
+    """返回观测掩码；未显式传入时按 ``np.nan`` 自动推断。
+
+    显式传参是为了让 ``fit`` 只扫一遍 NaN；自动推断是防呆——若调用方忘了传，
+    缺失值会退化成"答错"，正是本轮修复要消除的偏差来源。
+    """
+    if observed is not None:
+        return observed
+    if np.isnan(responses).any():
+        return ~np.isnan(responses)
+    return None
 
 
 def _logit_scalar_vec(p: np.ndarray) -> np.ndarray:

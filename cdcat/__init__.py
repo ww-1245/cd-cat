@@ -146,7 +146,7 @@ from .polytomous import (
     create_poly_selector,
 )
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 __all__ = [
     "QMatrix",
     "IdentifiabilityReport",

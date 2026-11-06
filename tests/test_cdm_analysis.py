@@ -535,6 +535,33 @@ class TestModelComparison:
         assert out["df"] <= 0
         assert out["p_value"] == pytest.approx(1.0)
 
+    @pytest.mark.parametrize("restricted", ["DINA", "DINO", "RRUM", "ACDM", "LLM"])
+    def test_lrt_recognizes_nesting_with_gdina(self, dina_data, restricted):
+        """五个受限模型都嵌套于饱和的 G-DINA，不应被标成"非嵌套"。
+
+        G-DINA 每题有 2^{r_j} 个自由概率，能表示任何题目反应函数，
+        因此 DINA / DINO / RRUM / ACDM / LLM 都是它的特例，
+        χ² 近似成立、p 值可用。
+        """
+        q, (_, X, _, _, _) = dina_data
+        analysis = run_cdm_analysis(
+            q, X, models=(restricted, "G-DINA"), max_iter=150
+        )
+        assert analysis.lrt is not None
+        assert analysis.lrt["nested"] is True
+        assert "不是嵌套" not in analysis.lrt.get("note", ""), analysis.lrt.get("note")
+        assert analysis.lrt["df"] == max(
+            analysis.models["G-DINA"].n_params - analysis.models[restricted].n_params, 0
+        )
+        assert analysis.lrt["df"] > 0
+
+    def test_lrt_flags_non_nested_restricted_models(self, dina_data):
+        """受限模型彼此之间不嵌套（DINA 与 ACDM 各有对方表达不了的形状）。"""
+        q, (_, X, _, _, _) = dina_data
+        analysis = run_cdm_analysis(q, X, models=("DINA", "ACDM"), max_iter=120)
+        assert analysis.lrt["nested"] is False
+        assert "不是嵌套" in analysis.lrt.get("note", "")
+
     def test_parameter_recovery_helper(self, dina_data):
         q, (_, X, _, slip, guess) = dina_data
         res = EMCalibrator(q, model_type="DINA", max_iter=250).fit(X)

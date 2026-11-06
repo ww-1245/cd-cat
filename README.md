@@ -49,7 +49,7 @@
 | **属性层级 AHM** | 有向先备关系、Warshall 可达闭包、合法模式枚举、层级一致性检查、**上限提升量化**；已接入辨识性分析 / 估计器 / 仿真器 |
 | **Q 矩阵自动修正** | **Qval / PVAF** 逐题搜索最优属性子集，自动给出「漏标属性」与「多余属性」建议并可直接应用 |
 | **绝对拟合诊断** | 题目级 Pearson χ² / 似然比 G² 检验、残差效应量、Yen **Q3** 局部依赖矩阵与超标题目对 |
-| **缺失值处理** | 作答矩阵缺失读取为 `NaN`；诊断 / 绝对拟合 / Q3 全链路**逐题掩码 + 配对删除**，不会被静默污染 |
+| **缺失值处理** | 作答矩阵缺失读取为 `NaN`；**标定按题边际化**（MAR，不当作答错），诊断 / 绝对拟合 / Q3 逐题掩码 + 配对删除，不会被静默污染 |
 | **模型比较** | 多模型标定、AIC/BIC/AICc 择优、嵌套模型似然比检验（自实现 χ² 上尾概率，无 scipy 依赖）；**非嵌套组合自动提示 ΔBIC 而非 p 值** |
 | **被试诊断** | MAP / EAP 双路知识状态、完整后验矩阵、属性边际概率、属性级信度、模式频次分布、MAP 置信度 |
 | **非参数诊断** | **距离判别（汉明 / 广义距离 GDD）**：不估计任何题目参数即可分类，可作为参数模型的零参数基线；支持层级约束与缺失作答 |
@@ -68,7 +68,7 @@
 | **命令行** | **`cdcat` 十五个子命令**：`presets` / `list` / `demo` / `calibrate` / `simulate` / `diagnose` / `ppmc` / `hier-test` / `assemble` / `online-calib` / `dif` / `nonparam` / `validate-q` / `report` / `report-html` |
 | **可视化** | **18 张交互式 Plotly 图**（界面）+ **13 张 matplotlib 静态图**（报告），含 6 面板标定报告、3 面板绝对拟合报告、群体四联图、收敛三连图 |
 | **交互界面** | Streamlit **九大功能页**，含「质量看板」（一屏 KPI 仪表 + 知识地图 + 逐题体检）与「多级评分」页；**浅色/深色双主题**，图表与页面配色一起切换 |
-| **测试** | **462 个测试**（含 20 个界面端到端冒烟测试、16 个 CLI 端到端测试），全部通过 |
+| **测试** | **486 个测试**（含 20 个界面端到端冒烟测试、16 个 CLI 端到端测试），全部通过 |
 
 ---
 
@@ -137,7 +137,7 @@ cdcat demo              # 一条命令跑完整链路并落盘产物
 pytest tests/ -v
 ```
 
-共 **462 个测试**：442 个核心库单元/集成测试 + 20 个 Streamlit 界面测试
+共 **486 个测试**：466 个核心库单元/集成测试 + 20 个 Streamlit 界面测试
 （后者用 `streamlit.testing.v1.AppTest` 在无浏览器环境下驱动真实页面，
 端到端跑通「生成数据 → 多模型标定 → 指标渲染」，可捕获页面级运行时异常；
 新模块另配 16 个 CLI 端到端测试，逐条验证落盘产物）。
@@ -264,12 +264,16 @@ demo/
 ├── bank_utils.py   题库构建与导入导出（转发库内定义）
 └── run_demo.py     CLI 完整演示（十步 + 十图 + Excel + HTML 导出）
 
-tests/
-├── test_cdcat.py           核心库单元与集成测试
-├── test_cdm_analysis.py    CDM 标定/诊断/比较/可视化测试
-├── test_cdm_diagnostics.py 先验估计 / 并行仿真 / 绝对拟合 / Q3 测试
-├── test_new_features.py    I/O / 缺失值 / 群体报告 / Q 修正 / 层级 / 多级评分 / CLI
-└── test_app_smoke.py       界面端到端冒烟测试（AppTest，16 项，含新增两页全流程）
+tests/                       486 项（466 核心 + 20 界面）
+├── test_cdcat.py            核心库单元与集成测试
+├── test_cdm_analysis.py     CDM 标定 / 诊断 / 比较 / 可视化
+├── test_cdm_diagnostics.py  先验估计 / 并行仿真 / 绝对拟合 / Q3
+├── test_new_models.py       ACDM / LLM 的结构性质与工厂投影
+├── test_ideal_selection.py  非参数准则 NPSHE / ERHD / AMI 的数值正确性
+├── test_missing_data.py     缺失作答的边际化与参数恢复
+├── test_new_features.py     I/O / 群体报告 / Q 修正 / 层级 / 多级评分 / CLI
+├── test_assembly.py 等      题库装配 / 在线标定 / 报告 / 非参数诊断
+└── test_app_smoke.py        界面端到端冒烟测试（AppTest，20 项）
 ```
 
 数据流：
@@ -474,6 +478,17 @@ $$
 \text{G-DINA}: \sum_j 2^{r_j}, \qquad
 \text{RRUM/ACDM/LLM}: \sum_j (1+r_j)
 $$
+
+#### 缺失作答：按题边际化
+
+缺失用 `np.nan` 标记。E 步只对已作答题连乘 $P(x_{ij}\mid\alpha)^{obs_{ij}}$，
+各 M 步的分子分母同时剔除该题——等价于 MAR 假设下的边际化，而不是"答错"。
+
+把缺失当 0 会让已掌握属性者被记一次失误，偏差方向单一且量级很大：
+同一份模拟数据（真值 slip = 0.10），20% 随机缺失下旧实现估出 0.29、
+40% 时顶到 0.499 上界；边际化后分别是 0.10 / 0.11，
+slip 的 MAE 从 0.186 / 0.358 降到 0.013 / 0.017（`tests/test_missing_data.py` 锁定）。
+整列缺失时该题参数不可识别，只发 `RuntimeWarning` 并保持初值。
 
 #### 经验贝叶斯属性先验 π(α)
 
@@ -1828,15 +1843,11 @@ streamlit run demo/app.py --theme.base dark  # 深色
 生成的数据上，P 矩阵恢复 MAE 仅 0.013、PMR 0.90（见 `tests/test_new_models.py`
 与 `test_cdm_analysis.py`）。
 
-> 顺带一个方法论提醒：`run_cdm_analysis` 现在只在**已知嵌套**的组合
-> （DINA ⊂ G-DINA、DINO ⊂ G-DINA）上给出 LRT 的 p 值，其余组合会附注
-> "非嵌套，请以 AIC/BIC 为准"。ACDM/LLM 与 DINA 之间既非嵌套也无参数包含关系，
-> 强行套 χ² 会给出看似严谨、实则无意义的 p 值。
-
-> 顺带一个方法论提醒：`run_cdm_analysis` 现在只在**已知嵌套**的组合
-> （DINA ⊂ G-DINA、DINO ⊂ G-DINA）上给出 LRT 的 p 值，其余组合会附注
-> "非嵌套，请以 AIC/BIC 为准"。ACDM/LLM 与 DINA 之间既非嵌套也无参数包含关系，
-> 强行套 χ² 会给出看似严谨、实则无意义的 p 值。
+> 顺带一个方法论提醒：`run_cdm_analysis` 只对**已知嵌套**的组合给出 LRT 的 p 值——
+> 五个受限模型（DINA / DINO / RRUM / ACDM / LLM）都嵌套于饱和的 G-DINA
+> （每题 $2^{r_j}$ 个自由概率，能表示任何题目反应函数），
+> 而它们彼此之间（如 ACDM 与 DINA）既非嵌套也无参数包含关系，
+> 会附注"非嵌套，请以 AIC/BIC 为准"。强行套 χ² 会给出看似严谨、实则无意义的 p 值。
 
 ### 各模型的参数恢复精度
 
