@@ -1,0 +1,13 @@
+[theme]
+# 只固定品牌主色与字体，刻意不写 base / backgroundColor / textColor ——
+# 一旦在这里写死，`streamlit run demo/app.py --theme.base dark` 就会被覆盖。
+# 明暗两套配色由 demo/app.py 里的设计令牌 + st.context.theme 自动选择。
+primaryColor = "#4F46E5"
+font = "sans serif"
+
+[browser]
+gatherUsageStats = false
+
+[client]
+showErrorDetails = true
+toolbarMode = "minimal"

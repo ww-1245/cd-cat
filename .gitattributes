@@ -1,0 +1,5 @@
+# 统一按 LF 存储，Windows 检出也保持 LF，避免跨平台换行噪声
+* text=auto eol=lf
+
+*.png binary
+*.xlsx binary

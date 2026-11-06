@@ -1,0 +1,26 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# ---- 测试与静态检查缓存 ----
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# ---- 运行产物（python demo/run_demo.py 可完整重建）----
+demo/output/
+*.log
+
+# ---- 本地工作区（不应进入版本库）----
+.workbuddy/
+.DS_Store
+Thumbs.db

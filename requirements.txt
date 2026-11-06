@@ -1,0 +1,17 @@
+# CD-CAT 系统运行依赖
+numpy>=1.24
+scipy>=1.10
+pandas>=2.0
+
+# 交互界面与可视化
+streamlit>=1.30
+plotly>=5.18
+matplotlib>=3.7
+
+# 性能与进度
+joblib>=1.3
+numba>=0.58
+tqdm>=4.65
+
+# 测试
+pytest>=7.4

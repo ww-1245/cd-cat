@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cdcat"
+version = "1.1.0"
+description = "认知诊断计算机自适应测验 (CD-CAT) 选题与仿真系统"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["CD-CAT", "cognitive diagnosis", "adaptive testing", "psychometrics", "DINA", "GDINA", "ACDM", "LLM"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Education :: Testing",
+]
+
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pandas>=2.0",
+]
+
+[project.scripts]
+cdcat = "cdcat.cli:main"
+
+[project.optional-dependencies]
+ui = ["streamlit>=1.30", "plotly>=5.18"]
+plot = ["matplotlib>=3.7"]
+perf = ["joblib>=1.3", "numba>=0.58", "tqdm>=4.65"]
+test = ["pytest>=7.4"]
+all = [
+    "streamlit>=1.30", "plotly>=5.18", "matplotlib>=3.7",
+    "joblib>=1.3", "numba>=0.58", "tqdm>=4.65", "pytest>=7.4",
+]
+
+[tool.setuptools.packages.find]
+include = ["cdcat*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
